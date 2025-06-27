@@ -415,11 +415,19 @@ func (pw *ParquetWriter) Flush(flag bool) error {
 
 			pageCount := len(rowGroup.Chunks[k].Pages)
 
+			// Count only data pages for column index as dictionary pages should not be included
+			dataPageCount := 0
+			for l := 0; l < pageCount; l++ {
+				if rowGroup.Chunks[k].Pages[l].Header.Type != parquet.PageType_DICTIONARY_PAGE {
+					dataPageCount++
+				}
+			}
+
 			//add ColumnIndex
 			columnIndex := parquet.NewColumnIndex()
-			columnIndex.NullPages = make([]bool, pageCount)
-			columnIndex.MinValues = make([][]byte, pageCount)
-			columnIndex.MaxValues = make([][]byte, pageCount)
+			columnIndex.NullPages = make([]bool, dataPageCount)
+			columnIndex.MinValues = make([][]byte, dataPageCount)
+			columnIndex.MaxValues = make([][]byte, dataPageCount)
 			columnIndex.BoundaryOrder = parquet.BoundaryOrder_UNORDERED
 			pw.ColumnIndexes = append(pw.ColumnIndexes, columnIndex)
 
@@ -429,6 +437,7 @@ func (pw *ParquetWriter) Flush(flag bool) error {
 			pw.OffsetIndexes = append(pw.OffsetIndexes, offsetIndex)
 
 			firstRowIndex := int64(0)
+			dataPageIndex := 0
 
 			for l := 0; l < pageCount; l++ {
 				if rowGroup.Chunks[k].Pages[l].Header.Type == parquet.PageType_DICTIONARY_PAGE {
@@ -460,14 +469,32 @@ func (pw *ParquetWriter) Flush(flag bool) error {
 						nullCount = page.Header.DataPageHeaderV2.Statistics.NullCount
 					}
 
-					columnIndex.MinValues[l] = minVal
-					columnIndex.MaxValues[l] = maxVal
+					// Handle nil values properly in column index.
+					// As per Parquet spec, min/max values are for non-null values only.
+					// For null values, we set min/max values to empty byte arrays and mark the page as potentially containing nulls.
+					if minVal == nil || maxVal == nil {
+						columnIndex.MinValues[dataPageIndex] = []byte{}
+						columnIndex.MaxValues[dataPageIndex] = []byte{}
+						columnIndex.NullPages[dataPageIndex] = false
+						// Check if this is actually a null page (all values are null)
+						if nullCount != nil && page.Header.DataPageHeader != nil {
+							totalValues := page.Header.DataPageHeader.NumValues
+							if *nullCount == int64(totalValues) {
+								columnIndex.NullPages[dataPageIndex] = true
+							}
+						}
+					} else {
+						columnIndex.MinValues[dataPageIndex] = minVal
+						columnIndex.MaxValues[dataPageIndex] = maxVal
+						columnIndex.NullPages[dataPageIndex] = false
+					}
+
 					// Statistics.NullCount is nil when statistics are omitted for the column otherwise for all column page headers it will be populated.
 					if nullCount != nil {
 						if columnIndex.NullCounts == nil {
-							columnIndex.NullCounts = make([]int64, pageCount)
+							columnIndex.NullCounts = make([]int64, dataPageCount)
 						}
-						columnIndex.NullCounts[l] = *nullCount
+						columnIndex.NullCounts[dataPageIndex] = *nullCount
 					}
 
 					pageLocation := parquet.NewPageLocation()
@@ -478,6 +505,7 @@ func (pw *ParquetWriter) Flush(flag bool) error {
 					offsetIndex.PageLocations = append(offsetIndex.PageLocations, pageLocation)
 
 					firstRowIndex += int64(page.Header.DataPageHeader.NumValues)
+					dataPageIndex++
 				}
 
 				data := rowGroup.Chunks[k].Pages[l].RawData
