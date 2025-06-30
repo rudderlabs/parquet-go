@@ -475,14 +475,7 @@ func (pw *ParquetWriter) Flush(flag bool) error {
 					if minVal == nil || maxVal == nil {
 						columnIndex.MinValues[dataPageIndex] = []byte{}
 						columnIndex.MaxValues[dataPageIndex] = []byte{}
-						columnIndex.NullPages[dataPageIndex] = false
-						// Check if this is actually a null page (all values are null)
-						if nullCount != nil && page.Header.DataPageHeader != nil {
-							totalValues := page.Header.DataPageHeader.NumValues
-							if *nullCount == int64(totalValues) {
-								columnIndex.NullPages[dataPageIndex] = true
-							}
-						}
+						columnIndex.NullPages[dataPageIndex] = true
 					} else {
 						columnIndex.MinValues[dataPageIndex] = minVal
 						columnIndex.MaxValues[dataPageIndex] = maxVal

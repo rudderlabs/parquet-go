@@ -4,7 +4,9 @@ example/output/*
 .env
 .env.*
 .vscode
-coverage.out
+*.coverprofile
+coverage.txt
+coverage.html
 bin
 out
 tmp
