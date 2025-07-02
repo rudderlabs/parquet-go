@@ -46,19 +46,31 @@ type ParquetWriter struct {
 
 	MarshalFunc func(src []interface{}, sh *schema.SchemaHandler) (*map[string]*layout.Table, error)
 
-	stopped bool
+	stopped            bool
+	disableColumnIndex bool
 }
 
-func NewParquetWriterFromWriter(w io.Writer, obj interface{}, np int64) (*ParquetWriter, error) {
+type ParquetWriterOption func(*ParquetWriter)
+
+func WithDisableColumnIndex(disable bool) ParquetWriterOption {
+	return func(pw *ParquetWriter) {
+		pw.disableColumnIndex = disable
+	}
+}
+
+func NewParquetWriterFromWriter(w io.Writer, obj interface{}, np int64, opts ...ParquetWriterOption) (*ParquetWriter, error) {
 	wf := writerfile.NewWriterFile(w)
-	return NewParquetWriter(wf, obj, np)
+	return NewParquetWriter(wf, obj, np, opts...)
 }
 
 // Create a parquet handler. Obj is a object with tags or JSON schema string.
-func NewParquetWriter(pFile source.ParquetFile, obj interface{}, np int64) (*ParquetWriter, error) {
+func NewParquetWriter(pFile source.ParquetFile, obj interface{}, np int64, opts ...ParquetWriterOption) (*ParquetWriter, error) {
 	var err error
 
 	res := new(ParquetWriter)
+	for _, opt := range opts {
+		opt(res)
+	}
 	res.NP = np
 	res.PageSize = 8 * 1024              //8K
 	res.RowGroupSize = 128 * 1024 * 1024 //128M
@@ -73,8 +85,10 @@ func NewParquetWriter(pFile source.ParquetFile, obj interface{}, np int64) (*Par
 	res.DictRecs = make(map[string]*layout.DictRecType)
 	res.Footer = parquet.NewFileMetaData()
 	res.Footer.Version = 1
-	res.ColumnIndexes = make([]*parquet.ColumnIndex, 0)
-	res.OffsetIndexes = make([]*parquet.OffsetIndex, 0)
+	if !res.disableColumnIndex {
+		res.ColumnIndexes = make([]*parquet.ColumnIndex, 0)
+		res.OffsetIndexes = make([]*parquet.OffsetIndex, 0)
+	}
 	//include the createdBy to avoid
 	//WARN  CorruptStatistics:118 - Ignoring statistics because created_by is null or empty! See PARQUET-251 and PARQUET-297
 	createdBy := "parquet-go version latest"
@@ -153,56 +167,57 @@ func (pw *ParquetWriter) WriteStop() error {
 	ts.Protocol = thrift.NewTCompactProtocolFactory().GetProtocol(ts.Transport)
 	pw.RenameSchema()
 
-	// write ColumnIndex
-	if len(pw.ColumnIndexes) > 0 {
-		idx := 0
-		for _, rowGroup := range pw.Footer.RowGroups {
-			for _, columnChunk := range rowGroup.Columns {
-				columnIndexBuf, err := ts.Write(context.TODO(), pw.ColumnIndexes[idx])
-				if err != nil {
-					return err
+	// write ColumnIndex if not disabled
+	if !pw.disableColumnIndex {
+		if len(pw.ColumnIndexes) > 0 {
+			idx := 0
+			for _, rowGroup := range pw.Footer.RowGroups {
+				for _, columnChunk := range rowGroup.Columns {
+					columnIndexBuf, err := ts.Write(context.TODO(), pw.ColumnIndexes[idx])
+					if err != nil {
+						return err
+					}
+					if _, err = pw.PFile.Write(columnIndexBuf); err != nil {
+						return err
+					}
+
+					idx++
+
+					pos := pw.Offset
+					columnChunk.ColumnIndexOffset = &pos
+					columnIndexBufSize := int32(len(columnIndexBuf))
+					columnChunk.ColumnIndexLength = &columnIndexBufSize
+
+					pw.Offset += int64(columnIndexBufSize)
 				}
-				if _, err = pw.PFile.Write(columnIndexBuf); err != nil {
-					return err
+			}
+		}
+
+		// write OffsetIndex
+		if len(pw.OffsetIndexes) > 0 {
+			idx := 0
+			for _, rowGroup := range pw.Footer.RowGroups {
+				for _, columnChunk := range rowGroup.Columns {
+					offsetIndexBuf, err := ts.Write(context.TODO(), pw.OffsetIndexes[idx])
+					if err != nil {
+						return err
+					}
+					if _, err = pw.PFile.Write(offsetIndexBuf); err != nil {
+						return err
+					}
+
+					idx++
+
+					pos := pw.Offset
+					columnChunk.OffsetIndexOffset = &pos
+					offsetIndexBufSize := int32(len(offsetIndexBuf))
+					columnChunk.OffsetIndexLength = &offsetIndexBufSize
+
+					pw.Offset += int64(offsetIndexBufSize)
 				}
-
-				idx++
-
-				pos := pw.Offset
-				columnChunk.ColumnIndexOffset = &pos
-				columnIndexBufSize := int32(len(columnIndexBuf))
-				columnChunk.ColumnIndexLength = &columnIndexBufSize
-
-				pw.Offset += int64(columnIndexBufSize)
 			}
 		}
 	}
-
-	// write OffsetIndex
-	if len(pw.OffsetIndexes) > 0 {
-		idx := 0
-		for _, rowGroup := range pw.Footer.RowGroups {
-			for _, columnChunk := range rowGroup.Columns {
-				offsetIndexBuf, err := ts.Write(context.TODO(), pw.OffsetIndexes[idx])
-				if err != nil {
-					return err
-				}
-				if _, err = pw.PFile.Write(offsetIndexBuf); err != nil {
-					return err
-				}
-
-				idx++
-
-				pos := pw.Offset
-				columnChunk.OffsetIndexOffset = &pos
-				offsetIndexBufSize := int32(len(offsetIndexBuf))
-				columnChunk.OffsetIndexLength = &offsetIndexBufSize
-
-				pw.Offset += int64(offsetIndexBufSize)
-			}
-		}
-	}
-
 	footerBuf, err := ts.Write(context.TODO(), pw.Footer)
 	if err != nil {
 		return err
@@ -423,18 +438,20 @@ func (pw *ParquetWriter) Flush(flag bool) error {
 				}
 			}
 
-			//add ColumnIndex
-			columnIndex := parquet.NewColumnIndex()
-			columnIndex.NullPages = make([]bool, dataPageCount)
-			columnIndex.MinValues = make([][]byte, dataPageCount)
-			columnIndex.MaxValues = make([][]byte, dataPageCount)
-			columnIndex.BoundaryOrder = parquet.BoundaryOrder_UNORDERED
-			pw.ColumnIndexes = append(pw.ColumnIndexes, columnIndex)
+			if !pw.disableColumnIndex {
+				//add ColumnIndex
+				columnIndex := parquet.NewColumnIndex()
+				columnIndex.NullPages = make([]bool, dataPageCount)
+				columnIndex.MinValues = make([][]byte, dataPageCount)
+				columnIndex.MaxValues = make([][]byte, dataPageCount)
+				columnIndex.BoundaryOrder = parquet.BoundaryOrder_UNORDERED
+				pw.ColumnIndexes = append(pw.ColumnIndexes, columnIndex)
 
-			//add OffsetIndex
-			offsetIndex := parquet.NewOffsetIndex()
-			offsetIndex.PageLocations = make([]*parquet.PageLocation, 0)
-			pw.OffsetIndexes = append(pw.OffsetIndexes, offsetIndex)
+				//add OffsetIndex
+				offsetIndex := parquet.NewOffsetIndex()
+				offsetIndex.PageLocations = make([]*parquet.PageLocation, 0)
+				pw.OffsetIndexes = append(pw.OffsetIndexes, offsetIndex)
+			}
 
 			firstRowIndex := int64(0)
 			dataPageIndex := 0
@@ -455,50 +472,54 @@ func (pw *ParquetWriter) Flush(flag bool) error {
 						panic(errors.New("unsupported data page: " + page.Header.String()))
 					}
 
-					var minVal []byte
-					var maxVal []byte
-					var nullCount *int64
-					if page.Header.DataPageHeader != nil && page.Header.DataPageHeader.Statistics != nil {
-						minVal = page.Header.DataPageHeader.Statistics.Min
-						maxVal = page.Header.DataPageHeader.Statistics.Max
-						nullCount = page.Header.DataPageHeader.Statistics.NullCount
+					if !pw.disableColumnIndex {
+						var minVal []byte
+						var maxVal []byte
+						var nullCount *int64
+						if page.Header.DataPageHeader != nil && page.Header.DataPageHeader.Statistics != nil {
+							minVal = page.Header.DataPageHeader.Statistics.Min
+							maxVal = page.Header.DataPageHeader.Statistics.Max
+							nullCount = page.Header.DataPageHeader.Statistics.NullCount
 
-					} else if page.Header.DataPageHeaderV2 != nil && page.Header.DataPageHeaderV2.Statistics != nil {
-						minVal = page.Header.DataPageHeaderV2.Statistics.Min
-						maxVal = page.Header.DataPageHeaderV2.Statistics.Max
-						nullCount = page.Header.DataPageHeaderV2.Statistics.NullCount
-					}
-
-					// Handle nil values properly in column index.
-					// As per Parquet spec, min/max values are for non-null values only.
-					// For null values, we set min/max values to empty byte arrays and mark the page as potentially containing nulls.
-					if minVal == nil || maxVal == nil {
-						columnIndex.MinValues[dataPageIndex] = []byte{}
-						columnIndex.MaxValues[dataPageIndex] = []byte{}
-						columnIndex.NullPages[dataPageIndex] = true
-					} else {
-						columnIndex.MinValues[dataPageIndex] = minVal
-						columnIndex.MaxValues[dataPageIndex] = maxVal
-						columnIndex.NullPages[dataPageIndex] = false
-					}
-
-					// Statistics.NullCount is nil when statistics are omitted for the column otherwise for all column page headers it will be populated.
-					if nullCount != nil {
-						if columnIndex.NullCounts == nil {
-							columnIndex.NullCounts = make([]int64, dataPageCount)
+						} else if page.Header.DataPageHeaderV2 != nil && page.Header.DataPageHeaderV2.Statistics != nil {
+							minVal = page.Header.DataPageHeaderV2.Statistics.Min
+							maxVal = page.Header.DataPageHeaderV2.Statistics.Max
+							nullCount = page.Header.DataPageHeaderV2.Statistics.NullCount
 						}
-						columnIndex.NullCounts[dataPageIndex] = *nullCount
+
+						// Handle nil values properly in column index.
+						// As per Parquet spec, min/max values are for non-null values only.
+						// For null values, we set min/max values to empty byte arrays and mark the page as potentially containing nulls.
+						columnIndex := pw.ColumnIndexes[len(pw.ColumnIndexes)-1]
+						if minVal == nil || maxVal == nil {
+							columnIndex.MinValues[dataPageIndex] = []byte{}
+							columnIndex.MaxValues[dataPageIndex] = []byte{}
+							columnIndex.NullPages[dataPageIndex] = true
+						} else {
+							columnIndex.MinValues[dataPageIndex] = minVal
+							columnIndex.MaxValues[dataPageIndex] = maxVal
+							columnIndex.NullPages[dataPageIndex] = false
+						}
+
+						// Statistics.NullCount is nil when statistics are omitted for the column otherwise for all column page headers it will be populated.
+						if nullCount != nil {
+							if columnIndex.NullCounts == nil {
+								columnIndex.NullCounts = make([]int64, dataPageCount)
+							}
+							columnIndex.NullCounts[dataPageIndex] = *nullCount
+						}
+
+						pageLocation := parquet.NewPageLocation()
+						pageLocation.Offset = pw.Offset
+						pageLocation.FirstRowIndex = firstRowIndex
+						pageLocation.CompressedPageSize = page.Header.CompressedPageSize
+
+						offsetIndex := pw.OffsetIndexes[len(pw.OffsetIndexes)-1]
+						offsetIndex.PageLocations = append(offsetIndex.PageLocations, pageLocation)
+
+						firstRowIndex += int64(page.Header.DataPageHeader.NumValues)
+						dataPageIndex++
 					}
-
-					pageLocation := parquet.NewPageLocation()
-					pageLocation.Offset = pw.Offset
-					pageLocation.FirstRowIndex = firstRowIndex
-					pageLocation.CompressedPageSize = page.Header.CompressedPageSize
-
-					offsetIndex.PageLocations = append(offsetIndex.PageLocations, pageLocation)
-
-					firstRowIndex += int64(page.Header.DataPageHeader.NumValues)
-					dataPageIndex++
 				}
 
 				data := rowGroup.Chunks[k].Pages[l].RawData

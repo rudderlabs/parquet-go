@@ -390,3 +390,63 @@ func boolPtr(v bool) *bool          { return &v }
 func strPtr(v string) *string       { return &v }
 func int32Ptr(v int32) *int32       { return &v }
 func int64Ptr(v int64) *int64       { return &v }
+
+// TestDisableColumnIndex tests that when disableColumnIndex is true, no ColumnIndex and OffsetIndex are written
+func TestDisableColumnIndex(t *testing.T) {
+	type Entry struct {
+		Name   *string  `parquet:"name=Name, type=BYTE_ARRAY, convertedtype=UTF8, encoding=PLAIN_DICTIONARY, repetitiontype=OPTIONAL"`
+		Age    *int32   `parquet:"name=Age, type=INT32, repetitiontype=OPTIONAL"`
+		Id     *int64   `parquet:"name=Id, type=INT64, repetitiontype=OPTIONAL"`
+		Weight *float32 `parquet:"name=Weight, type=FLOAT, repetitiontype=OPTIONAL"`
+		Sex    *bool    `parquet:"name=Sex, type=BOOLEAN, repetitiontype=OPTIONAL"`
+	}
+
+	var buf bytes.Buffer
+	fw := writerfile.NewWriterFile(&buf)
+
+	// Create writer with disableColumnIndex = true
+	pw, err := NewParquetWriter(fw, new(Entry), 1, WithDisableColumnIndex(true))
+	assert.NoError(t, err)
+
+	// Write some test data
+	for i := 0; i < 10; i++ {
+		entry := Entry{
+			Name:   strPtr(fmt.Sprintf("name_%d", i)),
+			Age:    int32Ptr(int32(20 + i)),
+			Id:     int64Ptr(int64(i + 1)),
+			Weight: float32Ptr(float32(50.0 + float32(i)*0.1)),
+			Sex:    boolPtr(i%2 == 0),
+		}
+		err = pw.Write(entry)
+		assert.NoError(t, err)
+	}
+	assert.NoError(t, pw.WriteStop())
+
+	// Read the written parquet file
+	pf, err := buffer.NewBufferFile(buf.Bytes())
+	assert.Nil(t, err)
+	defer func() {
+		assert.NoError(t, pf.Close())
+	}()
+	pr, err := reader.NewParquetReader(pf, nil, 1)
+	assert.NoError(t, err)
+
+	assert.NoError(t, pr.ReadFooter())
+
+	// Validate that no ColumnIndex and OffsetIndex were written
+	assert.Equal(t, 1, len(pr.Footer.RowGroups))
+	columns := pr.Footer.RowGroups[0].GetColumns()
+	assert.Equal(t, 5, len(columns))
+
+	// Check that all columns have no ColumnIndex and OffsetIndex
+	for i, column := range columns {
+		assert.Nil(t, column.ColumnIndexOffset, fmt.Sprintf("Column %d should have no ColumnIndexOffset", i))
+		assert.Nil(t, column.ColumnIndexLength, fmt.Sprintf("Column %d should have no ColumnIndexLength", i))
+		assert.Nil(t, column.OffsetIndexOffset, fmt.Sprintf("Column %d should have no OffsetIndexOffset", i))
+		assert.Nil(t, column.OffsetIndexLength, fmt.Sprintf("Column %d should have no OffsetIndexLength", i))
+	}
+
+	// Verify that the writer's internal ColumnIndexes and OffsetIndexes slices are empty
+	assert.Equal(t, 0, len(pw.ColumnIndexes), "ColumnIndexes should be empty when disabled")
+	assert.Equal(t, 0, len(pw.OffsetIndexes), "OffsetIndexes should be empty when disabled")
+}
