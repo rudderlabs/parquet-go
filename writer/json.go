@@ -24,9 +24,6 @@ func NewJSONWriterFromWriter(jsonSchema string, w io.Writer, np int64, opts ...P
 func NewJSONWriter(jsonSchema string, pfile source.ParquetFile, np int64, opts ...ParquetWriterOption) (*JSONWriter, error) {
 	var err error
 	res := new(JSONWriter)
-	for _, opt := range opts {
-		opt(&res.ParquetWriter)
-	}
 	res.SchemaHandler, err = schema.NewSchemaHandlerFromJSON(jsonSchema)
 	if err != nil {
 		return res, err
@@ -45,5 +42,8 @@ func NewJSONWriter(jsonSchema string, pfile source.ParquetFile, np int64, opts .
 	res.Offset = 4
 	_, err = res.PFile.Write([]byte("PAR1"))
 	res.MarshalFunc = marshal.MarshalJSON
+	for _, opt := range opts {
+		opt(&res.ParquetWriter)
+	}
 	return res, err
 }

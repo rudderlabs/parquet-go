@@ -26,9 +26,6 @@ func NewCSVWriterFromWriter(md []string, w io.Writer, np int64, opts ...ParquetW
 func NewCSVWriter(md []string, pfile source.ParquetFile, np int64, opts ...ParquetWriterOption) (*CSVWriter, error) {
 	var err error
 	res := new(CSVWriter)
-	for _, opt := range opts {
-		opt(&res.ParquetWriter)
-	}
 	res.SchemaHandler, err = schema.NewSchemaHandlerFromMetadata(md)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create schema from metadata: %s", err.Error())
@@ -46,6 +43,9 @@ func NewCSVWriter(md []string, pfile source.ParquetFile, np int64, opts ...Parqu
 	res.Offset = 4
 	_, err = res.PFile.Write([]byte("PAR1"))
 	res.MarshalFunc = marshal.MarshalCSV
+	for _, opt := range opts {
+		opt(&res.ParquetWriter)
+	}
 	return res, err
 }
 

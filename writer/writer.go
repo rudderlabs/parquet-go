@@ -68,9 +68,6 @@ func NewParquetWriter(pFile source.ParquetFile, obj interface{}, np int64, opts 
 	var err error
 
 	res := new(ParquetWriter)
-	for _, opt := range opts {
-		opt(res)
-	}
 	res.NP = np
 	res.PageSize = 8 * 1024              //8K
 	res.RowGroupSize = 128 * 1024 * 1024 //128M
@@ -85,10 +82,6 @@ func NewParquetWriter(pFile source.ParquetFile, obj interface{}, np int64, opts 
 	res.DictRecs = make(map[string]*layout.DictRecType)
 	res.Footer = parquet.NewFileMetaData()
 	res.Footer.Version = 1
-	if !res.disableColumnIndex {
-		res.ColumnIndexes = make([]*parquet.ColumnIndex, 0)
-		res.OffsetIndexes = make([]*parquet.OffsetIndex, 0)
-	}
 	//include the createdBy to avoid
 	//WARN  CorruptStatistics:118 - Ignoring statistics because created_by is null or empty! See PARQUET-251 and PARQUET-297
 	createdBy := "parquet-go version latest"
@@ -99,6 +92,13 @@ func NewParquetWriter(pFile source.ParquetFile, obj interface{}, np int64, opts 
 	}
 	res.MarshalFunc = marshal.Marshal
 	res.stopped = true
+	for _, opt := range opts {
+		opt(res)
+	}
+	if !res.disableColumnIndex {
+		res.ColumnIndexes = make([]*parquet.ColumnIndex, 0)
+		res.OffsetIndexes = make([]*parquet.OffsetIndex, 0)
+	}
 
 	if obj != nil {
 		if sa, ok := obj.(string); ok {

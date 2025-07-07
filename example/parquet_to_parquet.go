@@ -11,7 +11,7 @@ import (
 
 func main() {
 	// Input parquet file path
-	inputFile := "example/data/corrupted_column_index.parquet"
+	inputFile := "example/data/corruptedcolumnindex.parquet"
 
 	// Check if input file exists
 	if _, err := os.Stat(inputFile); os.IsNotExist(err) {

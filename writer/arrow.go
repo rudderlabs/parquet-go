@@ -33,9 +33,6 @@ func NewArrowWriter(arrowSchema *arrow.Schema, pfile source.ParquetFile,
 	np int64, opts ...ParquetWriterOption) (*ArrowWriter, error) {
 	var err error
 	res := new(ArrowWriter)
-	for _, opt := range opts {
-		opt(&res.ParquetWriter)
-	}
 	res.SchemaHandler, err = schema.NewSchemaHandlerFromArrow(arrowSchema)
 	if err != nil {
 		return res, fmt.Errorf("Unable to create schema from arrow definition: %s",
@@ -57,6 +54,9 @@ func NewArrowWriter(arrowSchema *arrow.Schema, pfile source.ParquetFile,
 	res.Offset = offset
 	_, err = res.PFile.Write([]byte("PAR1"))
 	res.MarshalFunc = marshal.MarshalArrow
+	for _, opt := range opts {
+		opt(&res.ParquetWriter)
+	}
 	return res, err
 }
 
