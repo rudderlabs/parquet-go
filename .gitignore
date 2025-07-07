@@ -1,5 +1,25 @@
 # exclude everything
 example/output/*
+.DS_Store
+.env
+.env.*
+.vscode
+*.coverprofile
+coverage.txt
+coverage.html
+bin
+out
+tmp
+.idea
+vendor
+.golangci.yaml
+.pre-commit-config.yaml
+config.yml
+ginkgo.report
+*.orig
+**/profile.out
+**/*.test
+*.log
 
 # exception to the rule
 !example/output/.gitkeep

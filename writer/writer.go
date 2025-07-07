@@ -46,16 +46,25 @@ type ParquetWriter struct {
 
 	MarshalFunc func(src []interface{}, sh *schema.SchemaHandler) (*map[string]*layout.Table, error)
 
-	stopped bool
+	stopped            bool
+	disableColumnIndex bool
 }
 
-func NewParquetWriterFromWriter(w io.Writer, obj interface{}, np int64) (*ParquetWriter, error) {
+type ParquetWriterOption func(*ParquetWriter)
+
+func WithDisableColumnIndex(disable bool) ParquetWriterOption {
+	return func(pw *ParquetWriter) {
+		pw.disableColumnIndex = disable
+	}
+}
+
+func NewParquetWriterFromWriter(w io.Writer, obj interface{}, np int64, opts ...ParquetWriterOption) (*ParquetWriter, error) {
 	wf := writerfile.NewWriterFile(w)
-	return NewParquetWriter(wf, obj, np)
+	return NewParquetWriter(wf, obj, np, opts...)
 }
 
 // Create a parquet handler. Obj is a object with tags or JSON schema string.
-func NewParquetWriter(pFile source.ParquetFile, obj interface{}, np int64) (*ParquetWriter, error) {
+func NewParquetWriter(pFile source.ParquetFile, obj interface{}, np int64, opts ...ParquetWriterOption) (*ParquetWriter, error) {
 	var err error
 
 	res := new(ParquetWriter)
@@ -73,8 +82,6 @@ func NewParquetWriter(pFile source.ParquetFile, obj interface{}, np int64) (*Par
 	res.DictRecs = make(map[string]*layout.DictRecType)
 	res.Footer = parquet.NewFileMetaData()
 	res.Footer.Version = 1
-	res.ColumnIndexes = make([]*parquet.ColumnIndex, 0)
-	res.OffsetIndexes = make([]*parquet.OffsetIndex, 0)
 	//include the createdBy to avoid
 	//WARN  CorruptStatistics:118 - Ignoring statistics because created_by is null or empty! See PARQUET-251 and PARQUET-297
 	createdBy := "parquet-go version latest"
@@ -85,6 +92,13 @@ func NewParquetWriter(pFile source.ParquetFile, obj interface{}, np int64) (*Par
 	}
 	res.MarshalFunc = marshal.Marshal
 	res.stopped = true
+	for _, opt := range opts {
+		opt(res)
+	}
+	if !res.disableColumnIndex {
+		res.ColumnIndexes = make([]*parquet.ColumnIndex, 0)
+		res.OffsetIndexes = make([]*parquet.OffsetIndex, 0)
+	}
 
 	if obj != nil {
 		if sa, ok := obj.(string); ok {
@@ -153,56 +167,57 @@ func (pw *ParquetWriter) WriteStop() error {
 	ts.Protocol = thrift.NewTCompactProtocolFactory().GetProtocol(ts.Transport)
 	pw.RenameSchema()
 
-	// write ColumnIndex
-	if len(pw.ColumnIndexes) > 0 {
-		idx := 0
-		for _, rowGroup := range pw.Footer.RowGroups {
-			for _, columnChunk := range rowGroup.Columns {
-				columnIndexBuf, err := ts.Write(context.TODO(), pw.ColumnIndexes[idx])
-				if err != nil {
-					return err
+	// write ColumnIndex if not disabled
+	if !pw.disableColumnIndex {
+		if len(pw.ColumnIndexes) > 0 {
+			idx := 0
+			for _, rowGroup := range pw.Footer.RowGroups {
+				for _, columnChunk := range rowGroup.Columns {
+					columnIndexBuf, err := ts.Write(context.TODO(), pw.ColumnIndexes[idx])
+					if err != nil {
+						return err
+					}
+					if _, err = pw.PFile.Write(columnIndexBuf); err != nil {
+						return err
+					}
+
+					idx++
+
+					pos := pw.Offset
+					columnChunk.ColumnIndexOffset = &pos
+					columnIndexBufSize := int32(len(columnIndexBuf))
+					columnChunk.ColumnIndexLength = &columnIndexBufSize
+
+					pw.Offset += int64(columnIndexBufSize)
 				}
-				if _, err = pw.PFile.Write(columnIndexBuf); err != nil {
-					return err
+			}
+		}
+
+		// write OffsetIndex
+		if len(pw.OffsetIndexes) > 0 {
+			idx := 0
+			for _, rowGroup := range pw.Footer.RowGroups {
+				for _, columnChunk := range rowGroup.Columns {
+					offsetIndexBuf, err := ts.Write(context.TODO(), pw.OffsetIndexes[idx])
+					if err != nil {
+						return err
+					}
+					if _, err = pw.PFile.Write(offsetIndexBuf); err != nil {
+						return err
+					}
+
+					idx++
+
+					pos := pw.Offset
+					columnChunk.OffsetIndexOffset = &pos
+					offsetIndexBufSize := int32(len(offsetIndexBuf))
+					columnChunk.OffsetIndexLength = &offsetIndexBufSize
+
+					pw.Offset += int64(offsetIndexBufSize)
 				}
-
-				idx++
-
-				pos := pw.Offset
-				columnChunk.ColumnIndexOffset = &pos
-				columnIndexBufSize := int32(len(columnIndexBuf))
-				columnChunk.ColumnIndexLength = &columnIndexBufSize
-
-				pw.Offset += int64(columnIndexBufSize)
 			}
 		}
 	}
-
-	// write OffsetIndex
-	if len(pw.OffsetIndexes) > 0 {
-		idx := 0
-		for _, rowGroup := range pw.Footer.RowGroups {
-			for _, columnChunk := range rowGroup.Columns {
-				offsetIndexBuf, err := ts.Write(context.TODO(), pw.OffsetIndexes[idx])
-				if err != nil {
-					return err
-				}
-				if _, err = pw.PFile.Write(offsetIndexBuf); err != nil {
-					return err
-				}
-
-				idx++
-
-				pos := pw.Offset
-				columnChunk.OffsetIndexOffset = &pos
-				offsetIndexBufSize := int32(len(offsetIndexBuf))
-				columnChunk.OffsetIndexLength = &offsetIndexBufSize
-
-				pw.Offset += int64(offsetIndexBufSize)
-			}
-		}
-	}
-
 	footerBuf, err := ts.Write(context.TODO(), pw.Footer)
 	if err != nil {
 		return err
@@ -415,23 +430,36 @@ func (pw *ParquetWriter) Flush(flag bool) error {
 
 			pageCount := len(rowGroup.Chunks[k].Pages)
 
-			//add ColumnIndex
-			columnIndex := parquet.NewColumnIndex()
-			columnIndex.NullPages = make([]bool, pageCount)
-			columnIndex.MinValues = make([][]byte, pageCount)
-			columnIndex.MaxValues = make([][]byte, pageCount)
-			columnIndex.BoundaryOrder = parquet.BoundaryOrder_UNORDERED
-			pw.ColumnIndexes = append(pw.ColumnIndexes, columnIndex)
+			// Count only data pages for column index as dictionary pages should not be included
+			dataPageCount := 0
+			for l := 0; l < pageCount; l++ {
+				if rowGroup.Chunks[k].Pages[l].Header.Type != parquet.PageType_DICTIONARY_PAGE {
+					dataPageCount++
+				}
+			}
 
-			//add OffsetIndex
-			offsetIndex := parquet.NewOffsetIndex()
-			offsetIndex.PageLocations = make([]*parquet.PageLocation, 0)
-			pw.OffsetIndexes = append(pw.OffsetIndexes, offsetIndex)
+			if !pw.disableColumnIndex {
+				//add ColumnIndex
+				columnIndex := parquet.NewColumnIndex()
+				columnIndex.NullPages = make([]bool, dataPageCount)
+				columnIndex.MinValues = make([][]byte, dataPageCount)
+				columnIndex.MaxValues = make([][]byte, dataPageCount)
+				columnIndex.BoundaryOrder = parquet.BoundaryOrder_UNORDERED
+				pw.ColumnIndexes = append(pw.ColumnIndexes, columnIndex)
+
+				//add OffsetIndex
+				offsetIndex := parquet.NewOffsetIndex()
+				offsetIndex.PageLocations = make([]*parquet.PageLocation, 0)
+				pw.OffsetIndexes = append(pw.OffsetIndexes, offsetIndex)
+			}
 
 			firstRowIndex := int64(0)
+			dataPageIndex := 0
 
 			for l := 0; l < pageCount; l++ {
-				if rowGroup.Chunks[k].Pages[l].Header.Type == parquet.PageType_DICTIONARY_PAGE {
+				page := rowGroup.Chunks[k].Pages[l]
+
+				if page.Header.Type == parquet.PageType_DICTIONARY_PAGE {
 					tmp := pw.Offset
 					rowGroup.Chunks[k].ChunkHeader.MetaData.DictionaryPageOffset = &tmp
 				} else if rowGroup.Chunks[k].ChunkHeader.MetaData.DataPageOffset <= 0 {
@@ -439,48 +467,64 @@ func (pw *ParquetWriter) Flush(flag bool) error {
 
 				}
 
-				page := rowGroup.Chunks[k].Pages[l]
 				//only record DataPage
 				if page.Header.Type != parquet.PageType_DICTIONARY_PAGE {
 					if page.Header.DataPageHeader == nil && page.Header.DataPageHeaderV2 == nil {
 						panic(errors.New("unsupported data page: " + page.Header.String()))
 					}
 
-					var minVal []byte
-					var maxVal []byte
-					var nullCount *int64
-					if page.Header.DataPageHeader != nil && page.Header.DataPageHeader.Statistics != nil {
-						minVal = page.Header.DataPageHeader.Statistics.Min
-						maxVal = page.Header.DataPageHeader.Statistics.Max
-						nullCount = page.Header.DataPageHeader.Statistics.NullCount
+					if !pw.disableColumnIndex {
+						var minVal []byte
+						var maxVal []byte
+						var nullCount *int64
+						if page.Header.DataPageHeader != nil && page.Header.DataPageHeader.Statistics != nil {
+							minVal = page.Header.DataPageHeader.Statistics.Min
+							maxVal = page.Header.DataPageHeader.Statistics.Max
+							nullCount = page.Header.DataPageHeader.Statistics.NullCount
 
-					} else if page.Header.DataPageHeaderV2 != nil && page.Header.DataPageHeaderV2.Statistics != nil {
-						minVal = page.Header.DataPageHeaderV2.Statistics.Min
-						maxVal = page.Header.DataPageHeaderV2.Statistics.Max
-						nullCount = page.Header.DataPageHeaderV2.Statistics.NullCount
-					}
-
-					columnIndex.MinValues[l] = minVal
-					columnIndex.MaxValues[l] = maxVal
-					// Statistics.NullCount is nil when statistics are omitted for the column otherwise for all column page headers it will be populated.
-					if nullCount != nil {
-						if columnIndex.NullCounts == nil {
-							columnIndex.NullCounts = make([]int64, pageCount)
+						} else if page.Header.DataPageHeaderV2 != nil && page.Header.DataPageHeaderV2.Statistics != nil {
+							minVal = page.Header.DataPageHeaderV2.Statistics.Min
+							maxVal = page.Header.DataPageHeaderV2.Statistics.Max
+							nullCount = page.Header.DataPageHeaderV2.Statistics.NullCount
 						}
-						columnIndex.NullCounts[l] = *nullCount
+
+						// Handle nil values properly in column index.
+						// As per Parquet spec, min/max values are for non-null values only.
+						// For null values, we set min/max values to empty byte arrays and mark the page as potentially containing nulls.
+						columnIndex := pw.ColumnIndexes[len(pw.ColumnIndexes)-1]
+						if minVal == nil || maxVal == nil {
+							columnIndex.MinValues[dataPageIndex] = []byte{}
+							columnIndex.MaxValues[dataPageIndex] = []byte{}
+							columnIndex.NullPages[dataPageIndex] = true
+						} else {
+							columnIndex.MinValues[dataPageIndex] = minVal
+							columnIndex.MaxValues[dataPageIndex] = maxVal
+							columnIndex.NullPages[dataPageIndex] = false
+						}
+
+						// Statistics.NullCount is nil when statistics are omitted for the column otherwise for all column page headers it will be populated.
+						if nullCount != nil {
+							if columnIndex.NullCounts == nil {
+								columnIndex.NullCounts = make([]int64, dataPageCount)
+							}
+							columnIndex.NullCounts[dataPageIndex] = *nullCount
+						}
+
+						pageLocation := parquet.NewPageLocation()
+						pageLocation.Offset = pw.Offset
+						pageLocation.FirstRowIndex = firstRowIndex
+						// https://github.com/apache/parquet-format/blob/master/src/main/thrift/parquet.thrift#L1112
+						pageLocation.CompressedPageSize = int32(len(page.RawData))
+
+						offsetIndex := pw.OffsetIndexes[len(pw.OffsetIndexes)-1]
+						offsetIndex.PageLocations = append(offsetIndex.PageLocations, pageLocation)
+
+						firstRowIndex += int64(page.Header.DataPageHeader.NumValues)
+						dataPageIndex++
 					}
-
-					pageLocation := parquet.NewPageLocation()
-					pageLocation.Offset = pw.Offset
-					pageLocation.FirstRowIndex = firstRowIndex
-					pageLocation.CompressedPageSize = page.Header.CompressedPageSize
-
-					offsetIndex.PageLocations = append(offsetIndex.PageLocations, pageLocation)
-
-					firstRowIndex += int64(page.Header.DataPageHeader.NumValues)
 				}
 
-				data := rowGroup.Chunks[k].Pages[l].RawData
+				data := page.RawData
 				if _, err = pw.PFile.Write(data); err != nil {
 					return err
 				}

@@ -1,6 +1,6 @@
 module github.com/xitongsys/parquet-go
 
-go 1.16
+go 1.24.4
 
 require (
 	github.com/apache/arrow/go/arrow v0.0.0-20200730104253-651201b0f516
@@ -12,4 +12,12 @@ require (
 	github.com/pierrec/lz4/v4 v4.1.8
 	github.com/stretchr/testify v1.7.0
 	github.com/xitongsys/parquet-go-source v0.0.0-20200817004010-026bad9b25d0
+)
+
+require (
+	github.com/davecgh/go-spew v1.1.0 // indirect
+	github.com/jmespath/go-jmespath v0.3.0 // indirect
+	github.com/pmezard/go-difflib v1.0.0 // indirect
+	golang.org/x/xerrors v0.0.0-20191204190536-9bdfabe68543 // indirect
+	gopkg.in/yaml.v3 v3.0.0-20200313102051-9f266ea9e77c // indirect
 )

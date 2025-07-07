@@ -17,13 +17,13 @@ type CSVWriter struct {
 	ParquetWriter
 }
 
-func NewCSVWriterFromWriter(md []string, w io.Writer, np int64) (*CSVWriter, error) {
+func NewCSVWriterFromWriter(md []string, w io.Writer, np int64, opts ...ParquetWriterOption) (*CSVWriter, error) {
 	wf := writerfile.NewWriterFile(w)
-	return NewCSVWriter(md, wf, np)
+	return NewCSVWriter(md, wf, np, opts...)
 }
 
-//Create CSV writer
-func NewCSVWriter(md []string, pfile source.ParquetFile, np int64) (*CSVWriter, error) {
+// Create CSV writer
+func NewCSVWriter(md []string, pfile source.ParquetFile, np int64, opts ...ParquetWriterOption) (*CSVWriter, error) {
 	var err error
 	res := new(CSVWriter)
 	res.SchemaHandler, err = schema.NewSchemaHandlerFromMetadata(md)
@@ -43,10 +43,13 @@ func NewCSVWriter(md []string, pfile source.ParquetFile, np int64) (*CSVWriter, 
 	res.Offset = 4
 	_, err = res.PFile.Write([]byte("PAR1"))
 	res.MarshalFunc = marshal.MarshalCSV
+	for _, opt := range opts {
+		opt(&res.ParquetWriter)
+	}
 	return res, err
 }
 
-//Write string values to parquet file
+// Write string values to parquet file
 func (w *CSVWriter) WriteString(recsi interface{}) error {
 	var err error
 	recs := recsi.([]*string)

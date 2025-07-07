@@ -5,7 +5,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand"
 	"testing"
+	"time"
 
 	"github.com/apache/thrift/lib/go/thrift"
 	"github.com/stretchr/testify/assert"
@@ -236,4 +238,215 @@ func TestNewWriterWithInvaidFile(t *testing.T) {
 	pw, err := NewParquetWriter(&invalidFile{}, new(test), 1)
 	assert.Nil(t, pw)
 	assert.ErrorIs(t, err, testWriteErr)
+}
+
+// TestColumnIndexMinMaxAndNullPages tests that ColumnIndex min/max values and null pages are correctly set
+// for different data types with various null patterns.
+func TestColumnIndexMinMaxAndNullPages(t *testing.T) {
+
+	type Entry struct {
+		Name   *string  `parquet:"name=Name, type=BYTE_ARRAY, convertedtype=UTF8, encoding=PLAIN_DICTIONARY, repetitiontype=OPTIONAL"`
+		Age    *int32   `parquet:"name=Age, type=INT32, repetitiontype=OPTIONAL"`
+		Id     *int64   `parquet:"name=Id, type=INT64, repetitiontype=OPTIONAL"`
+		Weight *float32 `parquet:"name=Weight, type=FLOAT, repetitiontype=OPTIONAL"`
+		Sex    *bool    `parquet:"name=Sex, type=BOOLEAN, repetitiontype=OPTIONAL"`
+	}
+
+	var buf bytes.Buffer
+	fw := writerfile.NewWriterFile(&buf)
+	pw, err := NewParquetWriter(fw, new(Entry), 4)
+	// Reduced page size to 64 to test pages with all null values for columns
+	pw.PageSize = 64
+	assert.NoError(t, err)
+
+	// 40 rows with all non-null values
+	for i := 0; i < 40; i++ {
+		entry := Entry{
+			Name:   strPtr(fmt.Sprintf("index_%d", i)),
+			Age:    int32Ptr(int32(20 + i%5)),
+			Id:     int64Ptr(int64(i + 1)),
+			Weight: float32Ptr(float32(50.0 + float32(i)*0.1)),
+			Sex:    boolPtr(i%2 == 0),
+		}
+		err = pw.Write(entry)
+		assert.NoError(t, err)
+	}
+
+	// 40 rows with all null values
+	for i := 40; i < 80; i++ {
+		entry := Entry{
+			Name:   nil,
+			Age:    nil,
+			Id:     nil,
+			Weight: nil,
+			Sex:    nil,
+		}
+		err = pw.Write(entry)
+		assert.NoError(t, err)
+	}
+
+	// 40 rows with mixed null/non-null values
+	probability := 0.4
+	src := rand.NewSource(time.Now().UnixNano())
+	r := rand.New(src)
+	for i := 80; i < 120; i++ {
+		entry := Entry{
+			Name:   nil,
+			Age:    nil,
+			Id:     nil,
+			Weight: nil,
+			Sex:    nil,
+		}
+		if r.Float64() < probability {
+			entry.Name = strPtr(fmt.Sprintf("index_%d", i))
+			entry.Age = int32Ptr(int32(20 + i%5))
+			entry.Id = int64Ptr(int64(i))
+			entry.Weight = float32Ptr(float32(50.0 + float32(i)*0.1))
+			entry.Sex = boolPtr(i%2 == 0)
+		}
+		err = pw.Write(entry)
+		assert.NoError(t, err)
+	}
+
+	assert.NoError(t, pw.WriteStop())
+
+	pf, err := buffer.NewBufferFile(buf.Bytes())
+	assert.Nil(t, err)
+	defer func() {
+		assert.NoError(t, pf.Close())
+	}()
+	pr, err := reader.NewParquetReader(pf, nil, 1)
+	assert.NoError(t, err)
+
+	assert.NoError(t, pr.ReadFooter())
+
+	assert.Equal(t, 1, len(pr.Footer.RowGroups))
+	columns := pr.Footer.RowGroups[0].GetColumns()
+	assert.Equal(t, 5, len(columns))
+
+	// Test each column's ColumnIndex
+	for i, column := range columns {
+		colIdx, err := readColumnIndex(pr.PFile, *column.ColumnIndexOffset)
+		assert.NoError(t, err, "Failed to read ColumnIndex for column %d", i)
+
+		// Verify that ColumnIndex structure is valid
+		assert.NotNil(t, colIdx, "ColumnIndex should not be nil for column %d", i)
+		assert.NotNil(t, colIdx.NullPages, "NullPages should not be nil for column %d", i)
+		assert.NotNil(t, colIdx.MinValues, "MinValues should not be nil for column %d", i)
+		assert.NotNil(t, colIdx.MaxValues, "MaxValues should not be nil for column %d", i)
+
+		// Verify that all arrays have the same length
+		nullPagesLen := len(colIdx.NullPages)
+		minValuesLen := len(colIdx.MinValues)
+		maxValuesLen := len(colIdx.MaxValues)
+		assert.Equal(t, nullPagesLen, minValuesLen, "NullPages and MinValues should have same length for column %d", i)
+		assert.Equal(t, nullPagesLen, maxValuesLen, "NullPages and MaxValues should have same length for column %d", i)
+
+		// Verify that if NullCounts is set, it has the correct length
+		if colIdx.IsSetNullCounts() {
+			assert.Equal(t, nullPagesLen, len(colIdx.NullCounts), "NullCounts should have same length as other arrays for column %d", i)
+		}
+
+		// Verify null pages and min/max values according to Parquet spec
+		for j, isNullPage := range colIdx.NullPages {
+			if isNullPage {
+				// For null pages (pages with ONLY null values), min and max values should be empty byte arrays
+				assert.Equal(t, 0, len(colIdx.MinValues[j]), fmt.Sprintf("MinValues should be empty for null page %d in column %d", j, i))
+				assert.Equal(t, 0, len(colIdx.MaxValues[j]), fmt.Sprintf("MaxValues should be empty for null page %d in column %d", j, i))
+			} else {
+				// For non-null pages (pages with at least some non-null values), min and max values should not be empty
+				assert.Greater(t, len(colIdx.MinValues[j]), 0, fmt.Sprintf("MinValues should not be empty for non-null page %d in column %d", j, i))
+				assert.Greater(t, len(colIdx.MaxValues[j]), 0, fmt.Sprintf("MaxValues should not be empty for non-null page %d in column %d", j, i))
+			}
+		}
+
+		// Verify that NullCounts is properly set for all columns (all are optional)
+		assert.True(t, colIdx.IsSetNullCounts(), fmt.Sprintf("NullCounts should be set for column %d", i))
+		assert.NotNil(t, colIdx.NullCounts, fmt.Sprintf("NullCounts should not be nil for column %d", i))
+
+		// Verify that null counts are reasonable
+		for j, nullCount := range colIdx.NullCounts {
+			assert.GreaterOrEqual(t, nullCount, int64(0), fmt.Sprintf("NullCount should not be negative for page %d in column %d", j, i))
+		}
+
+		// Verify that we have the expected patterns
+		// All columns should have some null pages due to the data pattern (40 non-null + 40 all-null + 40 mixed)
+		hasNullPages := false
+		for _, isNullPage := range colIdx.NullPages {
+			if isNullPage {
+				hasNullPages = true
+				break
+			}
+		}
+
+		// all columns should have some null pages
+		assert.True(t, hasNullPages, fmt.Sprintf("Column %d should have some null pages", i))
+	}
+}
+
+// Helper functions for creating pointers to primitive types
+func float32Ptr(v float32) *float32 { return &v }
+func boolPtr(v bool) *bool          { return &v }
+func strPtr(v string) *string       { return &v }
+func int32Ptr(v int32) *int32       { return &v }
+func int64Ptr(v int64) *int64       { return &v }
+
+// TestDisableColumnIndex tests that when disableColumnIndex is true, no ColumnIndex and OffsetIndex are written
+func TestDisableColumnIndex(t *testing.T) {
+	type Entry struct {
+		Name   *string  `parquet:"name=Name, type=BYTE_ARRAY, convertedtype=UTF8, encoding=PLAIN_DICTIONARY, repetitiontype=OPTIONAL"`
+		Age    *int32   `parquet:"name=Age, type=INT32, repetitiontype=OPTIONAL"`
+		Id     *int64   `parquet:"name=Id, type=INT64, repetitiontype=OPTIONAL"`
+		Weight *float32 `parquet:"name=Weight, type=FLOAT, repetitiontype=OPTIONAL"`
+		Sex    *bool    `parquet:"name=Sex, type=BOOLEAN, repetitiontype=OPTIONAL"`
+	}
+
+	var buf bytes.Buffer
+	fw := writerfile.NewWriterFile(&buf)
+
+	// Create writer with disableColumnIndex = true
+	pw, err := NewParquetWriter(fw, new(Entry), 1, WithDisableColumnIndex(true))
+	assert.NoError(t, err)
+
+	// Write some test data
+	for i := 0; i < 10; i++ {
+		entry := Entry{
+			Name:   strPtr(fmt.Sprintf("name_%d", i)),
+			Age:    int32Ptr(int32(20 + i)),
+			Id:     int64Ptr(int64(i + 1)),
+			Weight: float32Ptr(float32(50.0 + float32(i)*0.1)),
+			Sex:    boolPtr(i%2 == 0),
+		}
+		err = pw.Write(entry)
+		assert.NoError(t, err)
+	}
+	assert.NoError(t, pw.WriteStop())
+
+	// Read the written parquet file
+	pf, err := buffer.NewBufferFile(buf.Bytes())
+	assert.Nil(t, err)
+	defer func() {
+		assert.NoError(t, pf.Close())
+	}()
+	pr, err := reader.NewParquetReader(pf, nil, 1)
+	assert.NoError(t, err)
+
+	assert.NoError(t, pr.ReadFooter())
+
+	// Validate that no ColumnIndex and OffsetIndex were written
+	assert.Equal(t, 1, len(pr.Footer.RowGroups))
+	columns := pr.Footer.RowGroups[0].GetColumns()
+	assert.Equal(t, 5, len(columns))
+
+	// Check that all columns have no ColumnIndex and OffsetIndex
+	for i, column := range columns {
+		assert.Nil(t, column.ColumnIndexOffset, fmt.Sprintf("Column %d should have no ColumnIndexOffset", i))
+		assert.Nil(t, column.ColumnIndexLength, fmt.Sprintf("Column %d should have no ColumnIndexLength", i))
+		assert.Nil(t, column.OffsetIndexOffset, fmt.Sprintf("Column %d should have no OffsetIndexOffset", i))
+		assert.Nil(t, column.OffsetIndexLength, fmt.Sprintf("Column %d should have no OffsetIndexLength", i))
+	}
+
+	// Verify that the writer's internal ColumnIndexes and OffsetIndexes slices are empty
+	assert.Equal(t, 0, len(pw.ColumnIndexes), "ColumnIndexes should be empty when disabled")
+	assert.Equal(t, 0, len(pw.OffsetIndexes), "OffsetIndexes should be empty when disabled")
 }

@@ -25,12 +25,12 @@ type ArrowWriter struct {
 	ParquetWriter
 }
 
-//NewArrowWriter creates arrow schema parquet writer given the native
-//arrow schema, parquet file writer which contains the parquet file in
-//which we will write the record along with the number of parallel threads
-//which will write in the file.
+// NewArrowWriter creates arrow schema parquet writer given the native
+// arrow schema, parquet file writer which contains the parquet file in
+// which we will write the record along with the number of parallel threads
+// which will write in the file.
 func NewArrowWriter(arrowSchema *arrow.Schema, pfile source.ParquetFile,
-	np int64) (*ArrowWriter, error) {
+	np int64, opts ...ParquetWriterOption) (*ArrowWriter, error) {
 	var err error
 	res := new(ArrowWriter)
 	res.SchemaHandler, err = schema.NewSchemaHandlerFromArrow(arrowSchema)
@@ -54,6 +54,9 @@ func NewArrowWriter(arrowSchema *arrow.Schema, pfile source.ParquetFile,
 	res.Offset = offset
 	_, err = res.PFile.Write([]byte("PAR1"))
 	res.MarshalFunc = marshal.MarshalArrow
+	for _, opt := range opts {
+		opt(&res.ParquetWriter)
+	}
 	return res, err
 }
 

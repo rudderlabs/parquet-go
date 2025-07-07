@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"log"
 
 	"github.com/xitongsys/parquet-go-source/local"
@@ -11,28 +10,29 @@ import (
 func main() {
 	var err error
 	md := []string{
-		"name=Name, type=BYTE_ARRAY, convertedtype=UTF8, encoding=PLAIN_DICTIONARY",
-		"name=Age, type=INT32",
-		"name=Id, type=INT64",
-		"name=Weight, type=FLOAT",
-		"name=Sex, type=BOOLEAN",
+		"name=Name, type=BYTE_ARRAY, convertedtype=UTF8, encoding=PLAIN_DICTIONARY, repetitiontype=OPTIONAL",
+		"name=Age, type=INT32, repetitiontype=OPTIONAL",
+		"name=Id, type=INT64, repetitiontype=OPTIONAL",
+		"name=Weight, type=FLOAT, repetitiontype=OPTIONAL",
+		"name=Sex, type=BOOLEAN, repetitiontype=OPTIONAL",
 	}
 
 	//write
-	fw, err := local.NewLocalFileWriter("csv.parquet")
+	fw, err := local.NewLocalFileWriter("example/output/csv.parquet")
 	if err != nil {
 		log.Println("Can't open file", err)
 		return
 	}
-	pw, err := writer.NewCSVWriter(md, fw, 4)
+	pw, err := writer.NewCSVWriter(md, fw, 8, writer.WithDisableColumnIndex(true))
+	pw.RowGroupSize = 1 * 1024 * 1024
 	if err != nil {
 		log.Println("Can't create csv writer", err)
 		return
 	}
 
-	num := 10
+	num := 5000000
 	for i := 0; i < num; i++ {
-		data := []string{
+		/*data := []string{
 			fmt.Sprintf("%s_%d", "Student Name", i),
 			fmt.Sprintf("%d", 20+i%5),
 			fmt.Sprintf("%d", i),
@@ -45,12 +45,12 @@ func main() {
 		}
 		if err = pw.WriteString(rec); err != nil {
 			log.Println("WriteString error", err)
-		}
+		}*/
 
 		data2 := []interface{}{
 			"Student Name",
-			int32(20 + i%5),
-			int64(i),
+			int32(i),
+			nil,
 			float32(50.0 + float32(i)*0.1),
 			i%2 == 0,
 		}

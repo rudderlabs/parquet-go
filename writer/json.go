@@ -15,13 +15,13 @@ type JSONWriter struct {
 	ParquetWriter
 }
 
-func NewJSONWriterFromWriter(jsonSchema string, w io.Writer, np int64) (*JSONWriter, error) {
+func NewJSONWriterFromWriter(jsonSchema string, w io.Writer, np int64, opts ...ParquetWriterOption) (*JSONWriter, error) {
 	wf := writerfile.NewWriterFile(w)
-	return NewJSONWriter(jsonSchema, wf, np)
+	return NewJSONWriter(jsonSchema, wf, np, opts...)
 }
 
-//Create JSON writer
-func NewJSONWriter(jsonSchema string, pfile source.ParquetFile, np int64) (*JSONWriter, error) {
+// Create JSON writer
+func NewJSONWriter(jsonSchema string, pfile source.ParquetFile, np int64, opts ...ParquetWriterOption) (*JSONWriter, error) {
 	var err error
 	res := new(JSONWriter)
 	res.SchemaHandler, err = schema.NewSchemaHandlerFromJSON(jsonSchema)
@@ -42,5 +42,8 @@ func NewJSONWriter(jsonSchema string, pfile source.ParquetFile, np int64) (*JSON
 	res.Offset = 4
 	_, err = res.PFile.Write([]byte("PAR1"))
 	res.MarshalFunc = marshal.MarshalJSON
+	for _, opt := range opts {
+		opt(&res.ParquetWriter)
+	}
 	return res, err
 }
